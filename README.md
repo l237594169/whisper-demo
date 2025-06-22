@@ -1,6 +1,8 @@
 # WhisperX 视频转字幕 Web 工具
 
 基于 WhisperX 的智能视频语音识别与字幕生成 Web 应用，支持批量处理和多种输出格式。
+![ddd](images/image.png)
+![ddd](images/image1.png)
 
 ## 功能特性
 

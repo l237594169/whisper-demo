@@ -11,6 +11,20 @@ import tempfile
 import shutil
 from pathlib import Path
 import ollama
+import re
+import logging
+
+# 日志配置
+os.makedirs('logs', exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('logs/app.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -37,27 +51,67 @@ def get_ollama_models():
         print(f"无法连接到 Ollama 服务: {e}")
         return []
 
-def translate_srt_content(srt_content, target_lang, model_name):
-    """使用Ollama模型翻译SRT文件内容"""
-    try:
-        print(f"使用模型 '{model_name}' 翻译为 '{target_lang}'...")
-        prompt = f"""Translate the following SRT subtitle content to {target_lang}.
-Maintain the SRT format, including timestamps and sequence numbers, exactly as they are.
-Only translate the subtitle text itself.
-Do not add any extra explanations or text outside of the SRT content.
-Here is the content:
+def clean_ollama_codeblock(text):
+    """去除Ollama返回内容中的```srt和```包裹"""
+    # 去除开头的```srt或```，以及结尾的```
+    text = re.sub(r'^```srt\s*', '', text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r'^```\s*', '', text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r'```\s*$', '', text.strip())
+    return text.strip()
 
-{srt_content}
-"""
-        response = ollama.chat(
-            model=model_name,
-            messages=[{'role': 'user', 'content': prompt}]
-        )
-        translated_content = response['message']['content']
-        print("翻译完成.")
-        return translated_content
+def parse_srt_segments(srt_content):
+    """解析SRT为段落列表，每段为(dict: number, time, text)"""
+    segments = []
+    blocks = re.split(r'\n{2,}', srt_content.strip())
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) >= 3:
+            number = lines[0].strip()
+            time = lines[1].strip()
+            text = '\n'.join(lines[2:]).strip()
+            segments.append({'number': number, 'time': time, 'text': text})
+    return segments
+
+def build_srt_from_segments(segments):
+    """将分段列表拼接为SRT字符串"""
+    srt_lines = []
+    for seg in segments:
+        srt_lines.append(str(seg['number']))
+        srt_lines.append(seg['time'])
+        srt_lines.append(seg['text'])
+        srt_lines.append('')
+    return '\n'.join(srt_lines).strip()
+
+def ollama_translate_text(text, target_lang, model_name):
+    """同步调用Ollama翻译一段文本"""
+    prompt = f"请将下列内容翻译为{target_lang}，只输出翻译后的文本，不要输出任何解释。\n内容：{text}"
+    response = ollama.chat(
+        model=model_name,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+    return response['message']['content'].strip()
+
+def translate_srt_content(srt_content, target_lang, model_name):
+    """分段翻译SRT字幕内容，保留编号和时间戳"""
+    try:
+        logger.info(f"开始分段翻译SRT，目标语言: {target_lang}，模型: {model_name}")
+        segments = parse_srt_segments(srt_content)
+        translated_segments = []
+        for seg in segments:
+            logger.info(f"翻译字幕段 {seg['number']} 时间: {seg['time']}")
+            translated_text = ollama_translate_text(seg['text'], target_lang, model_name)
+            if isinstance(translated_text, str):
+                translated_text = translated_text.strip()
+            seg_new = {
+                'number': seg['number'],
+                'time': seg['time'],
+                'text': translated_text
+            }
+            translated_segments.append(seg_new)
+        logger.info(f"SRT分段翻译完成，共{len(translated_segments)}段")
+        return build_srt_from_segments(translated_segments)
     except Exception as e:
-        print(f"调用Ollama翻译时出错: {e}")
+        logger.error(f"分段翻译SRT时出错: {e}")
         return None
 
 def get_available_models():
@@ -156,6 +210,12 @@ def format_timestamp_vtt(seconds):
     millisecs = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millisecs:03d}"
 
+# 替换secure_filename，保留空格，只去除危险字符
+def safe_subtitle_filename(filename):
+    # 只去除/和\等危险字符，保留空格
+    filename = re.sub(r'[\\/]+', '', filename)
+    return filename
+
 @app.route('/')
 def index():
     """主页"""
@@ -198,7 +258,7 @@ def transcribe():
         ollama_model = request.form.get('ollama_model')
 
         # 生成唯一文件名
-        filename = secure_filename(file.filename)
+        filename = safe_subtitle_filename(file.filename)
         unique_id = str(uuid.uuid4())
         video_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_{filename}")
         
@@ -310,7 +370,7 @@ def batch_transcribe():
                 result_data = {}
                 try:
                     # 生成唯一文件名
-                    filename = secure_filename(file.filename)
+                    filename = safe_subtitle_filename(file.filename)
                     unique_id = str(uuid.uuid4())
                     video_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_{filename}")
                     
@@ -389,69 +449,83 @@ def batch_translate_files():
         target_lang = request.form.get('target_lang', 'zh')
         ollama_model = request.form.get('ollama_model')
         output_dir_str = request.form.get('output_dir', '')
-
+        logger.info(f"批量字幕翻译请求，目标语言: {target_lang}，模型: {ollama_model}，输出目录: {output_dir_str}")
         if not ollama_model:
+            logger.warning('未指定Ollama模型')
             return jsonify({'error': '未指定Ollama模型'}), 400
-
         output_dir = output_dir_str if output_dir_str else app.config['OUTPUT_FOLDER']
         os.makedirs(output_dir, exist_ok=True)
-
         existing_files = request.form.getlist('existing_files[]')
         uploaded_files = request.files.getlist('subtitle_files')
-
+        def is_valid_srt(content):
+            lines = content.strip().split('\n')
+            return (lines and lines[0].strip().isdigit() and '-->' in (lines[1] if len(lines)>1 else ''))
+        def is_valid_vtt(content):
+            lines = content.strip().split('\n')
+            return (lines and lines[0].strip().upper() == 'WEBVTT' and '-->' in (lines[2] if len(lines)>2 else ''))
         def generate_translation_results():
-            # 翻译已存在的文件
             for filename in existing_files:
                 try:
                     file_path = os.path.join(output_dir, filename)
                     base_name, ext = os.path.splitext(filename)
-
                     if not os.path.exists(file_path) or ext.lower() not in ['.srt', '.vtt']:
                         continue
-
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
-                    
+                    if ext.lower() == '.srt' and not is_valid_srt(content):
+                        logger.warning(f"文件{filename} SRT格式错误")
+                        yield json.dumps({'filename': filename, 'status': 'failed', 'error': 'SRT字幕格式错误'}) + '\n'
+                        continue
+                    if ext.lower() == '.vtt' and not is_valid_vtt(content):
+                        logger.warning(f"文件{filename} VTT格式错误")
+                        yield json.dumps({'filename': filename, 'status': 'failed', 'error': 'VTT字幕格式错误'}) + '\n'
+                        continue
+                    logger.info(f"开始翻译文件: {filename}")
                     translated_content = translate_srt_content(content, target_lang, ollama_model)
-
                     if translated_content:
                         translated_filename = f"{base_name}.{target_lang}{ext}"
                         translated_path = os.path.join(output_dir, translated_filename)
                         with open(translated_path, 'w', encoding='utf-8') as f:
                             f.write(translated_content)
+                        logger.info(f"翻译完成: {translated_filename}")
                         yield json.dumps({'filename': filename, 'status': 'success', 'translated_file': translated_filename}) + '\n'
                     else:
                         raise Exception("翻译返回空内容")
-
                 except Exception as e:
+                    logger.error(f"翻译文件{filename}时出错: {e}")
                     yield json.dumps({'filename': filename, 'status': 'failed', 'error': str(e)}) + '\n'
-            
-            # 翻译新上传的文件
             for file in uploaded_files:
-                filename = secure_filename(file.filename)
+                filename = safe_subtitle_filename(file.filename)
                 try:
                     base_name, ext = os.path.splitext(filename)
                     if ext.lower() not in ['.srt', '.vtt']:
                         continue
-
                     content = file.read().decode('utf-8')
+                    if ext.lower() == '.srt' and not is_valid_srt(content):
+                        logger.warning(f"上传文件{filename} SRT格式错误")
+                        yield json.dumps({'filename': filename, 'status': 'failed', 'error': 'SRT字幕格式错误'}) + '\n'
+                        continue
+                    if ext.lower() == '.vtt' and not is_valid_vtt(content):
+                        logger.warning(f"上传文件{filename} VTT格式错误")
+                        yield json.dumps({'filename': filename, 'status': 'failed', 'error': 'VTT字幕格式错误'}) + '\n'
+                        continue
+                    logger.info(f"开始翻译上传文件: {filename}")
                     translated_content = translate_srt_content(content, target_lang, ollama_model)
-
                     if translated_content:
                         translated_filename = f"{base_name}.{target_lang}{ext}"
                         translated_path = os.path.join(output_dir, translated_filename)
                         with open(translated_path, 'w', encoding='utf-8') as f:
                             f.write(translated_content)
+                        logger.info(f"翻译完成: {translated_filename}")
                         yield json.dumps({'filename': filename, 'status': 'success', 'translated_file': translated_filename}) + '\n'
                     else:
                         raise Exception("翻译返回空内容")
-
                 except Exception as e:
+                    logger.error(f"翻译上传文件{filename}时出错: {e}")
                     yield json.dumps({'filename': filename, 'status': 'failed', 'error': str(e)}) + '\n'
-
         return Response(stream_with_context(generate_translation_results()), mimetype='application/x-ndjson')
-
     except Exception as e:
+        logger.error(f"批量翻译处理失败: {e}")
         return jsonify({'error': f'批量翻译处理失败: {str(e)}'}), 500
 
 @app.route('/api/ollama-models', methods=['GET'])

@@ -450,7 +450,7 @@
                 <div class="translation-options">
                     <div class="form-group">
                         <label for="singleTranslate">
-                            <input type="checkbox" id="singleTranslate" onchange="toggleTranslateOptions('single')">
+                            <input type="checkbox" id="singleTranslate" onchange="toggleTranslateOptions('single')" checked>
                             启用翻译 (仅支持 SRT/VTT 格式)
                         </label>
                     </div>
@@ -531,7 +531,7 @@
                 <div class="translation-options">
                     <div class="form-group">
                         <label for="batchTranslate">
-                            <input type="checkbox" id="batchTranslate" onchange="toggleTranslateOptions('batch')">
+                            <input type="checkbox" id="batchTranslate" onchange="toggleTranslateOptions('batch')" checked>
                             启用翻译 (仅支持 SRT/VTT 格式)
                         </label>
                     </div>
@@ -727,14 +727,17 @@
                     let translatedFileHtml = '';
                     if (result.translated_output_file) {
                         const outputDir = document.getElementById('singleOutputDir').value;
-                        translatedFileHtml = `<br>翻译文件: ${result.translated_output_file} <a href="/api/download/${result.translated_output_file}?output_dir=${encodeURIComponent(outputDir)}" class="btn btn-secondary btn-sm">下载翻译文件</a>`;
+                        translatedFileHtml = `
+                            <a href="/api/download/${result.translated_output_file}?output_dir=${encodeURIComponent(outputDir)}" class="btn btn-primary" style="margin-right:10px;">下载翻译字幕</a>
+                            <a href="/api/download/${result.output_file}?output_dir=${encodeURIComponent(outputDir)}" class="btn btn-secondary btn-sm">下载原始字幕</a>
+                        `;
+                    } else {
+                        translatedFileHtml = `<a href="/api/download/${result.output_file}" class="btn btn-primary">下载字幕文件</a>`;
                     }
                     showAlert('singleResult', `
                         <strong>处理成功！</strong><br>
-                        输出文件: ${result.output_file}<br>
                         检测语言: ${result.language}<br>
-                        处理耗时: ${result.processing_time} 秒
-                        <a href="/api/download/${result.output_file}" class="btn btn-secondary btn-sm" style="margin-top: 10px;">下载原始文件</a>
+                        处理耗时: ${result.processing_time} 秒<br>
                         ${translatedFileHtml}
                     `, 'success');
                 } else {
@@ -842,19 +845,24 @@
                             const downloadBtnContainer = document.createElement('div');
                             downloadBtnContainer.style.marginTop = '10px';
                             
-                            const downloadBtn = document.createElement('a');
-                            downloadBtn.href = `/api/download/${result.output_file}?output_dir=${encodeURIComponent(outputDir)}`;
-                            downloadBtn.className = 'btn btn-secondary btn-sm';
-                            downloadBtn.textContent = '下载原文';
-                            downloadBtnContainer.appendChild(downloadBtn);
-
                             if (result.translated_output_file) {
                                 const downloadTranslatedBtn = document.createElement('a');
                                 downloadTranslatedBtn.href = `/api/download/${result.translated_output_file}?output_dir=${encodeURIComponent(outputDir)}`;
-                                downloadTranslatedBtn.className = 'btn btn-secondary btn-sm';
-                                downloadTranslatedBtn.textContent = '下载译文';
-                                downloadTranslatedBtn.style.marginLeft = '10px';
+                                downloadTranslatedBtn.className = 'btn btn-primary';
+                                downloadTranslatedBtn.textContent = '下载翻译字幕';
                                 downloadBtnContainer.appendChild(downloadTranslatedBtn);
+                                const downloadBtn = document.createElement('a');
+                                downloadBtn.href = `/api/download/${result.output_file}?output_dir=${encodeURIComponent(outputDir)}`;
+                                downloadBtn.className = 'btn btn-secondary btn-sm';
+                                downloadBtn.textContent = '下载原始字幕';
+                                downloadBtn.style.marginLeft = '10px';
+                                downloadBtnContainer.appendChild(downloadBtn);
+                            } else {
+                                const downloadBtn = document.createElement('a');
+                                downloadBtn.href = `/api/download/${result.output_file}?output_dir=${encodeURIComponent(outputDir)}`;
+                                downloadBtn.className = 'btn btn-primary';
+                                downloadBtn.textContent = '下载字幕文件';
+                                downloadBtnContainer.appendChild(downloadBtn);
                             }
 
                             fileItem.appendChild(downloadBtnContainer);
@@ -1165,6 +1173,10 @@
                     }
                 }
             });
+
+            // 默认显示翻译选项
+            toggleTranslateOptions('single');
+            toggleTranslateOptions('batch');
         });
     </script>
 </body>
